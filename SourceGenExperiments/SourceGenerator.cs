@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Data;
 using System.Linq;
 using System.Reflection;
 using System.Text;
@@ -193,6 +192,8 @@ namespace SourceGenExperiments
         {
             var hubType = metadataLoadContext.ResolveType("Microsoft.AspNetCore.SignalR.Hub");
             var hubOfTType = metadataLoadContext.ResolveType("Microsoft.AspNetCore.SignalR.Hub`1");
+            var hubCallerClientsType = metadataLoadContext.ResolveType("Microsoft.AspNetCore.SignalR.IHubCallerClients`1");
+            var hubCallerClientsTypes = hubCallerClientsType.GetInterfaces().Concat(new[] { hubCallerClientsType }).ToArray();
             var asyncEnumerable = metadataLoadContext.ResolveType("System.Collections.Generic.IAsyncEnumerable`1");
 
             var sb = new StringBuilder();
@@ -214,6 +215,20 @@ namespace SourceGenExperiments
                 }
             }
 
+            writer.WriteLine("namespace Microsoft.AspNetCore.SignalR");
+            writer.StartBlock();
+            writer.WriteLine("// This should be in the framework");
+            writer.WriteLine($"public delegate Task HubInvocationDelegate({hubType} hub, Microsoft.AspNetCore.SignalR.HubConnectionContext connection, Microsoft.AspNetCore.SignalR.Protocol.HubMessage message, {typeof(CancellationToken)} cancellationToken);");
+            writer.WriteLine($"public delegate void HubInitializerDelegate({hubType} hub, Microsoft.AspNetCore.SignalR.HubConnectionContext connection, Microsoft.AspNetCore.SignalR.IHubCallerClients clients);");
+
+            writer.WriteLine("public interface IHubDefinition");
+            writer.StartBlock();
+            writer.WriteLine("void AddHubMethod(string name, HubInvocationDelegate handler);");
+            writer.WriteLine("void SetHubInitializer(HubInitializerDelegate initializer);");
+            writer.EndBlock();
+
+            writer.EndBlock();
+
             foreach (var t in hubTypes)
             {
                 var globalNs = t.Namespace is null;
@@ -222,6 +237,7 @@ namespace SourceGenExperiments
                     writer.WriteLine($"namespace {t.Namespace}");
                     writer.StartBlock();
                 }
+
                 writer.WriteLine($"{(t.IsPublic ? "public " : "")}partial class {t.Name}");
                 writer.StartBlock();
 
@@ -230,14 +246,14 @@ namespace SourceGenExperiments
                 var index = 0;
                 foreach (var m in t.GetMethods(BindingFlags.Public | BindingFlags.Instance))
                 {
-                    if (index > 0)
-                    {
-                        writer.WriteLine("");
-                    }
-
                     if (!IsHubMethod(m))
                     {
                         continue;
+                    }
+
+                    if (index > 0)
+                    {
+                        writer.WriteLine("");
                     }
 
                     var parameters = m.GetParameters();
@@ -443,16 +459,124 @@ namespace SourceGenExperiments
                     index++;
                 }
 
+                if (IsHubOfT(t, out var interfaceType))
+                {
+                    writer.WriteLine("");
+                    writer.WriteLine(@$"public static void InitializeHub({hubType} hub, Microsoft.AspNetCore.SignalR.HubConnectionContext connection, Microsoft.AspNetCore.SignalR.IHubCallerClients clients)");
+                    writer.StartBlock();
+                    writer.WriteLine("// We need to wrap the original");
+                    writer.WriteLine($"(({t})hub).Clients = new {t.Name}ClientsImpl(clients);");
+                    writer.EndBlock();
+                    writer.WriteLine("");
+
+                    // Generate the proxy class
+                    writer.WriteLine($@"private class {interfaceType}Impl : {interfaceType}");
+                    writer.StartBlock();
+                    writer.WriteLine("private Microsoft.AspNetCore.SignalR.IClientProxy Proxy { get; }");
+                    writer.WriteLine($"public {interfaceType}Impl(Microsoft.AspNetCore.SignalR.IClientProxy proxy) => Proxy = proxy;");
+                    foreach (var m in interfaceType.GetMethods())
+                    {
+                        writer.Write($"public {m.ReturnType} {m.Name}(");
+                        var parameters = m.GetParameters();
+                        foreach (var p in parameters)
+                        {
+                            if (p.Position > 0)
+                            {
+                                writer.WriteNoIndent(", ");
+                            }
+                            writer.WriteNoIndent($"{p.ParameterType} {p.Name}");
+                        }
+                        writer.WriteNoIndent(")");
+                        writer.WriteNoIndent($@" => Proxy.SendCoreAsync(""{m.Name}""");
+                        foreach (var p in parameters)
+                        {
+                            writer.WriteNoIndent(", ");
+                            if (p.Position == 0)
+                            {
+                                writer.WriteNoIndent("new object[] {");
+                            }
+                            writer.WriteNoIndent(p.Name);
+                        }
+
+                        if (parameters.Length > 0)
+                        {
+                            writer.WriteNoIndent("}");
+                        }
+                        else
+                        {
+                            writer.WriteNoIndent("System.Array.Empty<object>()");
+                        }
+                        writer.WriteLineNoIndent(");");
+                    }
+                    writer.EndBlock();
+                    writer.WriteLine("");
+
+                    // Generate the hub caller clients impl
+                    writer.WriteLine($@"private class {t.Name}ClientsImpl : Microsoft.AspNetCore.SignalR.IHubCallerClients<{interfaceType}>");
+                    writer.StartBlock();
+                    writer.WriteLine("private readonly Microsoft.AspNetCore.SignalR.IHubCallerClients _clients;");
+
+                    writer.WriteLine($"public {t.Name}ClientsImpl(Microsoft.AspNetCore.SignalR.IHubCallerClients clients) => _clients = clients;");
+                    writer.WriteLine("");
+
+                    // Get all the properties and methods in the interface hierarchy
+                    foreach (var hct in hubCallerClientsTypes)
+                    {
+                        foreach (var p in hct.GetProperties())
+                        {
+                            writer.WriteLine($"public {interfaceType} {p.Name} => new {interfaceType}Impl(_clients.{p.Name});");
+                            writer.WriteLine("");
+                        }
+                    }
+
+                    foreach (var hct in hubCallerClientsTypes)
+                    {
+                        foreach (var m in hct.GetMethods())
+                        {
+                            // Is special name isn't working yet
+                            if (m.IsSpecialName) continue;
+
+                            writer.Write($"public {interfaceType} {m.Name}(");
+                            var parameters = m.GetParameters();
+                            foreach (var p in parameters)
+                            {
+                                if (p.Position > 0)
+                                {
+                                    writer.WriteNoIndent(", ");
+                                }
+                                writer.WriteNoIndent($"{p.ParameterType} {p.Name}");
+                            }
+                            writer.WriteNoIndent(")");
+                            writer.WriteNoIndent($@" => new {interfaceType}Impl(_clients.{m.Name}(");
+                            foreach (var p in parameters)
+                            {
+                                if (p.Position > 0)
+                                {
+                                    writer.WriteNoIndent(",");
+                                }
+                                writer.WriteNoIndent(p.Name);
+                            }
+                            writer.WriteLineNoIndent("));");
+                        }
+                    }
+                    writer.WriteLine("");
+                    writer.EndBlock();
+                }
+
                 writer.WriteLine("");
-                writer.WriteLine(@$"public static void BindHub(IDictionary<string, Func<{hubType}, Microsoft.AspNetCore.SignalR.HubConnectionContext, Microsoft.AspNetCore.SignalR.Protocol.HubMessage, {typeof(CancellationToken)}, Task>> definition)");
-                writer.WriteLine("{");
-                writer.Indent();
+                writer.WriteLine(@$"public static void BindHub(Microsoft.AspNetCore.SignalR.IHubDefinition definition)");
+                writer.StartBlock();
+                
+                if (interfaceType is not null)
+                {
+                    writer.WriteLine("definition.SetHubInitializer(InitializeHub);");
+                }
+
                 foreach (var (method, thunk) in generatedMethods)
                 {
-                    writer.WriteLine($@"definition.Add(""{method}"", {thunk});");
+                    writer.WriteLine($@"definition.AddHubMethod(""{method}"", {thunk});");
                 }
-                writer.Unindent();
-                writer.WriteLine("}");
+                writer.EndBlock();
 
                 writer.EndBlock();
 
@@ -487,7 +611,7 @@ namespace SourceGenExperiments
                 if (t.BaseType?.IsGenericType == true &&
                     t.BaseType.GetGenericTypeDefinition() == hubOfTType)
                 {
-                    interfaceType = t.GetGenericArguments()[0];
+                    interfaceType = t.BaseType.GetGenericArguments()[0];
                     return true;
                 }
                 interfaceType = null;
