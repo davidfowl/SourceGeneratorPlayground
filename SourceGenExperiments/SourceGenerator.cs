@@ -199,7 +199,6 @@ namespace SourceGenExperiments
             var writer = new CodeWriter(sb);
 
             var hubTypes = new List<Type>();
-            var hubOfTTypes = new List<Type>();
 
             foreach (var t in metadataLoadContext.Assembly.GetTypes())
             {
@@ -209,12 +208,6 @@ namespace SourceGenExperiments
                     {
                         // Diagnostic!
                         continue;
-                    }
-
-                    if (t.BaseType?.IsGenericType == true &&
-                        t.BaseType.GetGenericTypeDefinition() == hubOfTType)
-                    {
-                        hubOfTTypes.Add(t);
                     }
 
                     hubTypes.Add(t);
@@ -271,29 +264,30 @@ namespace SourceGenExperiments
                     writer.WriteLine($"static async Task {generatedMethod}({hubType} hub, Microsoft.AspNetCore.SignalR.HubConnectionContext connection, Microsoft.AspNetCore.SignalR.Protocol.HubMessage message, {typeof(CancellationToken)} cancellationToken)");
                     writer.StartBlock();
 
+                    if (hasStreamingParameters)
+                    {
+                        writer.WriteLine("var invocation = (Microsoft.AspNetCore.SignalR.Protocol.StreamInvocationMessage)message;");
+                        var streamingIndex = 0;
+                        for (int i = 0; i < streamingParameters.Length; i++)
+                        {
+                            if (streamingParameters[i] is not Type streamType)
+                            {
+                                continue;
+                            }
+                            writer.WriteLine($"var channel{i} = System.Threading.Channels.Channel.CreateBounded<{streamType}>(10);");
+                            writer.WriteLine("// Register this channel with the runtime based on this stream id");
+                            writer.WriteLine($"// connection.AddStream(invocation.StreamIds[{streamingIndex++}], item => channel{i}.WriteAsync(({streamType})item), (Exception ex) => channel{i}.TryComplete(ex));");
+                            writer.WriteLine($"var stream{i} = channel{i}.Reader.ReadAllAsync();");
+                        }
+                    }
+                    else
+                    {
+                        writer.WriteLine("var invocation = (Microsoft.AspNetCore.SignalR.Protocol.InvocationMessage)message;");
+                    }
+
                     if (!hasStreamingReturn)
                     {
                         // Hub invocation
-                        if (hasStreamingParameters)
-                        {
-                            writer.WriteLine("var invocation = (Microsoft.AspNetCore.SignalR.Protocol.StreamInvocationMessage)message;");
-                            var streamingIndex = 0;
-                            for (int i = 0; i < streamingParameters.Length; i++)
-                            {
-                                if (streamingParameters[i] is not Type streamType)
-                                {
-                                    continue;
-                                }
-                                writer.WriteLine($"var channel{i} = System.Threading.Channels.Channel.CreateBounded<{streamType}>(10);");
-                                writer.WriteLine("// Register this channel with the runtime based on this stream id");
-                                writer.WriteLine($"// connection.AddStream(invocation.StreamIds[{streamingIndex++}], item => channel{i}.WriteAsync(({streamType})item), (Exception ex) => channel{i}.TryComplete(ex));");
-                                writer.WriteLine($"var stream{i} = channel{i}.Reader.ReadAllAsync();");
-                            }
-                        }
-                        else
-                        {
-                            writer.WriteLine("var invocation = (Microsoft.AspNetCore.SignalR.Protocol.InvocationMessage)message;");
-                        }
                         writer.WriteLine("var args = invocation.Arguments;");
 
                         var task = m.ReturnType.Equals(typeof(Task)) ||
@@ -384,26 +378,6 @@ namespace SourceGenExperiments
                     }
                     else
                     {
-                        if (hasStreamingParameters)
-                        {
-                            writer.WriteLine("var invocation = (Microsoft.AspNetCore.SignalR.Protocol.StreamInvocationMessage)message;");
-                            var streamingIndex = 0;
-                            for (int i = 0; i < streamingParameters.Length; i++)
-                            {
-                                if (streamingParameters[i] is not Type streamType)
-                                {
-                                    continue;
-                                }
-                                writer.WriteLine($"var channel{i} = System.Threading.Channels.Channel.CreateBounded<{streamType}>(10);");
-                                writer.WriteLine("// Register this channel with the runtime based on this stream id");
-                                writer.WriteLine($"// connection.AddStream(invocation.StreamIds[{streamingIndex++}], item => channel{i}.WriteAsync(({streamType})item), (Exception ex) => channel{i}.TryComplete(ex));");
-                                writer.WriteLine($"var stream{i} = channel{i}.Reader.ReadAllAsync();");
-                            }
-                        }
-                        else
-                        {
-                            writer.WriteLine("var invocation = (Microsoft.AspNetCore.SignalR.Protocol.InvocationMessage)message;");
-                        }
                         writer.WriteLine("var args = invocation.Arguments;");
                         writer.WriteLine("var streamItemMessage = new Microsoft.AspNetCore.SignalR.Protocol.StreamItemMessage(invocation.InvocationId, null);");
 
@@ -502,6 +476,18 @@ namespace SourceGenExperiments
 
                 var baseType = baseDefinition.IsGenericType ? baseDefinition.GetGenericTypeDefinition() : baseDefinition;
                 return !hubType.Equals(baseType);
+            }
+
+            bool IsHubOfT(Type t, out Type interfaceType)
+            {
+                if (t.BaseType?.IsGenericType == true &&
+                    t.BaseType.GetGenericTypeDefinition() == hubOfTType)
+                {
+                    interfaceType = t.GetGenericArguments()[0];
+                    return true;
+                }
+                interfaceType = null;
+                return false;
             }
         }
 
