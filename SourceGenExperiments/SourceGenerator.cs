@@ -246,8 +246,7 @@ namespace SourceGenExperiments
 
                     foreach (var p in parameters)
                     {
-                        if (p.ParameterType.IsGenericType &&
-                            p.ParameterType.GetGenericTypeDefinition().Equals(asyncEnumerable))
+                        if (IsAsyncEnumerable(p.ParameterType))
                         {
                             // Streaming parameter
                             streamingParameters[p.Position] = p.ParameterType.GetGenericArguments()[0];
@@ -255,8 +254,7 @@ namespace SourceGenExperiments
                         }
                     }
 
-                    var hasStreamingReturn = m.ReturnType.IsGenericType &&
-                        m.ReturnType.GetGenericTypeDefinition().Equals(asyncEnumerable);
+                    var hasStreamingReturn = IsAsyncEnumerable(m.ReturnType);
 
                     var generatedMethod = $"{m.Name}Thunk";
                     generatedMethods.Add((m.Name, generatedMethod));
@@ -465,6 +463,12 @@ namespace SourceGenExperiments
             }
 
             context.AddSource("Hubs.g.cs", SourceText.From(sb.ToString().Trim(), Encoding.UTF8));
+
+
+            bool IsAsyncEnumerable(Type type)
+            {
+                return type.IsGenericType && type.GetGenericTypeDefinition().Equals(asyncEnumerable);
+            }
 
             bool IsHubMethod(MethodInfo methodInfo)
             {
