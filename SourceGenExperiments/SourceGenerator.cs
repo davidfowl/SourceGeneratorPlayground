@@ -451,7 +451,7 @@ namespace SourceGenExperiments
                 writer.Indent();
                 foreach (var (method, thunk) in generatedMethods)
                 {
-                    writer.WriteLine($@"definition.Add(""{method}"", static (hub, connection, message, token) => {thunk}(hub, connection, message, token));");
+                    writer.WriteLine($@"definition.Add(""{method}"", {thunk});");
                 }
                 writer.Unindent();
                 writer.WriteLine("}");
