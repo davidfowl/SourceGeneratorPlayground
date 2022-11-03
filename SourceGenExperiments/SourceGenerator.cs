@@ -1,11 +1,13 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Text;
 using Roslyn.Reflection;
 using SourceGenerator;
@@ -17,10 +19,147 @@ namespace SourceGenExperiments
     {
         public void Execute(GeneratorExecutionContext context)
         {
+            if (context.SyntaxReceiver is not SyntaxReceiver receiver)
+            {
+                return;
+            }
+
             var metadataLoadContext = new MetadataLoadContext(context.Compilation);
 
+            DiscoverMiddleware(receiver.MapMiddleware, context, metadataLoadContext);
             DiscoverHubs(context, metadataLoadContext);
             DiscoverControllers(context, metadataLoadContext);
+        }
+
+        private void DiscoverMiddleware(List<InvocationExpressionSyntax> calls, GeneratorExecutionContext context, MetadataLoadContext metadataLoadContext)
+        {
+            var appbuilderType = metadataLoadContext.ResolveType("Microsoft.AspNetCore.Builder.IApplicationBuilder");
+
+            var sb = new StringBuilder();
+            var writer = new CodeWriter(sb);
+
+            var middlewareTypes = new List<(Location, Type)>();
+
+            foreach (var invocation in calls)
+            {
+                var semanticModel = context.Compilation.GetSemanticModel(invocation.SyntaxTree);
+
+                var mapMiddlewareMethod = semanticModel.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
+
+                if (mapMiddlewareMethod.IsExtensionMethod &&
+                    mapMiddlewareMethod.IsGenericMethod &&
+                    appbuilderType.Equals(mapMiddlewareMethod.ReceiverType))
+                {
+                    // We only want to generate overloads for calls that have a Delegate parameter
+                }
+                else
+                {
+                    continue;
+                }
+
+                middlewareTypes.Add((invocation.GetLocation(), mapMiddlewareMethod.TypeArguments[0].AsType(metadataLoadContext)));
+            }
+
+            foreach (var (l, t) in middlewareTypes)
+            {
+                if (!t.GetTypeSymbol().IsPartial())
+                {
+                    // TODO: Diagnostic!
+                    continue;
+                }
+
+                if (t.Namespace is { } ns)
+                {
+                    writer.WriteLine($"namespace {ns}");
+                    writer.StartBlock();
+                }
+
+                var invokeMethod = t.GetMethod("Invoke", BindingFlags.Instance | BindingFlags.Public);
+
+                //foreach (var m in t.GetMethods())
+                //{
+                //    if (!m.Name.Equals("Invoke"))
+                //    {
+                //        continue;
+                //    }
+                //    writer.WriteCommentedLine(m.Name);
+                //}
+
+                if (invokeMethod is null)
+                {
+                    context.ReportDiagnostic(Diagnostic.Create(Diagnostics.MissingInvokeMethod, l, t.FullName));
+                    continue;
+                }
+
+                writer.WriteLine($"partial class {t}");
+                writer.StartBlock();
+
+                writer.WriteLine($"public static Microsoft.AspNetCore.Http.RequestDelegate CreateDelegate({appbuilderType} app, Microsoft.AspNetCore.Http.RequestDelegate next)");
+                writer.StartBlock();
+                var ctors = t.GetConstructors();
+                if (ctors.Length == 0)
+                {
+                    writer.WriteLine($"{t} m = new {t}();");
+                }
+                else if (ctors.Length == 1)
+                {
+                    var ctor = ctors[0];
+                    var ctorParameters = ctor.GetParameters();
+
+                    if (ctorParameters.Length == 1)
+                    {
+                        writer.WriteLine($"{t} m = new {t}(next);");
+                    }
+                    else
+                    {
+                        // Services?
+                        writer.WriteLine("// Do ActivtorUtilities");
+                        writer.WriteLine($"{t} m = default;");
+                    }
+                }
+                else
+                {
+                    writer.WriteLine("// Do ActivtorUtilities");
+                    writer.WriteLine($"{t} m = default;");
+                }
+                var parameters = invokeMethod.GetParameters();
+
+                if (parameters.Length == 1)
+                {
+                    writer.WriteLine("return m.Invoke;");
+                }
+                else
+                {
+                    writer.WriteLine("Task HandleRequest(Microsoft.AspNetCore.Http.HttpContext context)");
+                    writer.StartBlock();
+                    foreach (var p in parameters)
+                    {
+                        if (p.Position == 0) continue;
+                        writer.WriteLine($"var {p.Name} = context.RequestServices.GetService<{p.ParameterType}>();");
+                    }
+                    writer.Write("return m.Invoke(context");
+                    foreach (var p in parameters)
+                    {
+                        if (p.Position == 0) continue;
+                        writer.WriteNoIndent(", ");
+                        // Services
+                        writer.WriteNoIndent(p.Name);
+                    }
+                    writer.WriteLineNoIndent(");");
+                    writer.EndBlock();
+                    writer.WriteLine("return HandleRequest;");
+                }
+                writer.EndBlock();
+
+                writer.EndBlock();
+
+                if (t.Namespace is not null)
+                {
+                    writer.EndBlock();
+                }
+            }
+
+            context.AddSource("Middleware.g.cs", SourceText.From(sb.ToString(), Encoding.UTF8));
         }
 
         private static void DiscoverControllers(GeneratorExecutionContext context, MetadataLoadContext metadataLoadContext)
@@ -566,7 +705,7 @@ namespace SourceGenExperiments
                 writer.WriteLine("");
                 writer.WriteLine(@$"public static void BindHub(Microsoft.AspNetCore.SignalR.IHubDefinition definition)");
                 writer.StartBlock();
-                
+
                 if (interfaceType is not null)
                 {
                     writer.WriteLine("definition.SetHubInitializer(InitializeHub);");
@@ -621,7 +760,34 @@ namespace SourceGenExperiments
 
         public void Initialize(GeneratorInitializationContext context)
         {
-
+            context.RegisterForSyntaxNotifications(() => new SyntaxReceiver());
         }
+
+        private class SyntaxReceiver : ISyntaxReceiver
+        {
+            public List<InvocationExpressionSyntax> MapMiddleware { get; } = new();
+
+            public void OnVisitSyntaxNode(SyntaxNode syntaxNode)
+            {
+                if (syntaxNode is InvocationExpressionSyntax
+                    {
+                        Expression: MemberAccessExpressionSyntax
+                        {
+                            Name: GenericNameSyntax
+                            {
+                                Identifier.ValueText: "UseMiddleware"
+                            }
+                        }
+                    } useMiddleware)
+                {
+                    MapMiddleware.Add(useMiddleware);
+                }
+            }
+        }
+    }
+
+    class Diagnostics
+    {
+        public static readonly DiagnosticDescriptor MissingInvokeMethod = new DiagnosticDescriptor("MID001", "MissingInvokeMethod", "Missing Invoke method {0}", "Usage", DiagnosticSeverity.Error, isEnabledByDefault: true);
     }
 }
