@@ -340,6 +340,25 @@ namespace SourceGenExperiments
 
             var hubTypes = new List<Type>();
 
+            writer.WriteLine("namespace Microsoft.AspNetCore.SignalR");
+            writer.StartBlock();
+            writer.WriteLine("// These are types that will be in the framework");
+
+            writer.WriteLine("public interface IHubDefinition");
+            writer.StartBlock();
+            writer.WriteLine("void AddHubMethod(string name, HubInvocationDelegate handler);");
+            writer.WriteLine("void SetHubInitializer(HubInitializerDelegate initializer);");
+            writer.EndBlock();
+
+            writer.WriteLine("public interface IStreamTracker");
+            writer.StartBlock();
+            writer.WriteLine("void AddStream(string name, System.Func<object, ValueTask> writeStreamItem, System.Func<System.Exception, bool> completeStream);");
+            writer.WriteLine("void RemoveStream(string name);");
+            writer.EndBlock();
+            writer.WriteLine($"public delegate Task HubInvocationDelegate({hubType} hub, Microsoft.AspNetCore.SignalR.HubConnectionContext connection, Microsoft.AspNetCore.SignalR.IStreamTracker streamTracker, Microsoft.AspNetCore.SignalR.Protocol.HubMessage message, {typeof(CancellationToken)} cancellationToken);");
+            writer.WriteLine($"public delegate void HubInitializerDelegate({hubType} hub, Microsoft.AspNetCore.SignalR.HubConnectionContext connection, Microsoft.AspNetCore.SignalR.IHubCallerClients clients);");
+            writer.EndBlock();
+
             foreach (var t in metadataLoadContext.Assembly.GetTypes())
             {
                 if (hubType.IsAssignableFrom(t) && !t.Equals(hubType))
@@ -353,20 +372,6 @@ namespace SourceGenExperiments
                     hubTypes.Add(t);
                 }
             }
-
-            writer.WriteLine("namespace Microsoft.AspNetCore.SignalR");
-            writer.StartBlock();
-            writer.WriteLine("// This should be in the framework");
-            writer.WriteLine($"public delegate Task HubInvocationDelegate({hubType} hub, Microsoft.AspNetCore.SignalR.HubConnectionContext connection, Microsoft.AspNetCore.SignalR.Protocol.HubMessage message, {typeof(CancellationToken)} cancellationToken);");
-            writer.WriteLine($"public delegate void HubInitializerDelegate({hubType} hub, Microsoft.AspNetCore.SignalR.HubConnectionContext connection, Microsoft.AspNetCore.SignalR.IHubCallerClients clients);");
-
-            writer.WriteLine("public interface IHubDefinition");
-            writer.StartBlock();
-            writer.WriteLine("void AddHubMethod(string name, HubInvocationDelegate handler);");
-            writer.WriteLine("void SetHubInitializer(HubInitializerDelegate initializer);");
-            writer.EndBlock();
-
-            writer.EndBlock();
 
             foreach (var t in hubTypes)
             {
@@ -414,7 +419,7 @@ namespace SourceGenExperiments
                     var generatedMethod = $"{m.Name}Thunk";
                     generatedMethods.Add((m.Name, generatedMethod));
 
-                    writer.WriteLine($"static async Task {generatedMethod}({hubType} hub, Microsoft.AspNetCore.SignalR.HubConnectionContext connection, Microsoft.AspNetCore.SignalR.Protocol.HubMessage message, {typeof(CancellationToken)} cancellationToken)");
+                    writer.WriteLine($"static async Task {generatedMethod}({hubType} hub, Microsoft.AspNetCore.SignalR.HubConnectionContext connection, Microsoft.AspNetCore.SignalR.IStreamTracker streamTracker, Microsoft.AspNetCore.SignalR.Protocol.HubMessage message, {typeof(CancellationToken)} cancellationToken)");
                     writer.StartBlock();
 
                     if (hasStreamingParameters)
@@ -429,7 +434,7 @@ namespace SourceGenExperiments
                             }
                             writer.WriteLine($"var channel{i} = System.Threading.Channels.Channel.CreateBounded<{streamType}>(10);");
                             writer.WriteLine("// Register this channel with the runtime based on this stream id");
-                            writer.WriteLine($"// connection.AddStream(invocation.StreamIds[{streamingIndex++}], item => channel{i}.WriteAsync(({streamType})item), (Exception ex) => channel{i}.TryComplete(ex));");
+                            writer.WriteLine($"streamTracker.AddStream(invocation.StreamIds[{streamingIndex++}], item => channel{i}.Writer.WriteAsync(({streamType})item), (Exception ex) => channel{i}.Writer.TryComplete(ex));");
                             writer.WriteLine($"var stream{i} = channel{i}.Reader.ReadAllAsync();");
                         }
                     }
@@ -517,7 +522,7 @@ namespace SourceGenExperiments
                                 }
                                 writer.WriteLine($"channel{i}.Writer.TryComplete();");
                                 writer.WriteLine("// Unregister this channel with the runtime based on this stream id");
-                                writer.WriteLine($"// connection.RemoveStream(invocation.StreamIds[{streamingIndex++}]);");
+                                writer.WriteLine($"streamTracker.RemoveStream(invocation.StreamIds[{streamingIndex++}]);");
                             }
                             writer.WriteLine("");
                         }
@@ -588,7 +593,7 @@ namespace SourceGenExperiments
                                 }
                                 writer.WriteLine($"channel{i}.Writer.TryComplete();");
                                 writer.WriteLine("// Unregister this channel with the runtime based on this stream id");
-                                writer.WriteLine($"// connection.RemoveStream(invocation.StreamIds[{streamingIndex++}]);");
+                                writer.WriteLine($"streamTracker.RemoveStream(invocation.StreamIds[{streamingIndex++}]);");
                             }
                         }
                         writer.EndBlock();
