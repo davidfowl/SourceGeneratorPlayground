@@ -198,7 +198,7 @@ namespace SourceGenExperiments
                 writer.WriteLine($"public partial class {t.Name}");
                 writer.StartBlock();
 
-                writer.WriteLine(@$"public static void BindHub(IDictionary<string, Func<{t}, Microsoft.AspNetCore.SignalR.HubConnectionContext, Microsoft.AspNetCore.SignalR.Protocol.HubMessage, {typeof(CancellationToken)}, Task>> definition)");
+                writer.WriteLine(@$"public static void BindController(IDictionary<string, Func<{t}>> definition)");
                 writer.StartBlock();
 
                 foreach (var m in t.GetMethods(BindingFlags.Public | BindingFlags.Instance))
