@@ -1,7 +1,7 @@
 ﻿using Microsoft.AspNetCore.Http;
 public partial class HomeController
 {
-    public static void BindHub(IDictionary<string, Func<HomeController, Microsoft.AspNetCore.SignalR.HubConnectionContext, Microsoft.AspNetCore.SignalR.Protocol.HubMessage, System.Threading.CancellationToken, Task>> definition)
+    public static void BindController(IDictionary<string, Func<HomeController>> definition)
     {
     }
 }
